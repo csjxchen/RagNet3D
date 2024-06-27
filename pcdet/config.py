@@ -81,5 +81,5 @@ def cfg_from_yaml_file(cfg_file, config):
 
 
 cfg = EasyDict()
-cfg.ROOT_DIR = (Path(__file__).resolve().parent / '../').resolve()
+cfg.ROOT_DIR = Path("/opt/data/private/research_exps/detection3d/OpenPCDet/").resolve()
 cfg.LOCAL_RANK = 0

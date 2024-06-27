@@ -368,7 +368,7 @@ class VoxelSetAbstraction(nn.Module):
 
         if 'raw_points' in self.model_cfg.FEATURES_SOURCE:
             raw_points = batch_dict['points']
-
+            
             pooled_features = self.aggregate_keypoint_features_from_one_source(
                 batch_size=batch_size, aggregate_func=self.SA_rawpoints,
                 xyz=raw_points[:, 1:4],

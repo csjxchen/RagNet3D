@@ -4,16 +4,16 @@ import argparse
 import os
 from os import path as osp
 import torch
-from av2.utils.io import read_feather
+# from av2.utils.io import read_feather
 import numpy as np
 import multiprocessing as mp
 import pickle as pkl
 from pathlib import Path
-import pandas as pd
+# import pandas as pd
 
 from ..dataset import DatasetTemplate
-from .argo2_utils.so3 import yaw_to_quat, quat_to_yaw
-from .argo2_utils.constants import LABEL_ATTR
+# from .argo2_utils.so3 import yaw_to_quat, quat_to_yaw
+# from .argo2_utils.constants import LABEL_ATTR
 
 
 def process_single_segment(segment_path, split, info_list, ts2idx, output_dir, save_bin):

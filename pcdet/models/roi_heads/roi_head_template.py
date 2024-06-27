@@ -25,7 +25,12 @@ class RoIHeadTemplate(nn.Module):
             'reg_loss_func',
             loss_utils.WeightedSmoothL1Loss(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'])
         )
-
+        if self.model_cfg.LOSS_CONFIG.get('GRID_LOSS', None) is not None:
+            if self.model_cfg.LOSS_CONFIG['GRID_LOSS']:
+                      self.add_module(
+                    'grid_reg_loss_func',
+                    loss_utils.WeightedSmoothL1Loss(code_weights=losses_cfg.LOSS_WEIGHTS['grid_code_weight'])
+                        )  
     def make_fc_layers(self, input_channels, output_channels, fc_list):
         fc_layers = []
         pre_channel = input_channels
@@ -228,8 +233,29 @@ class RoIHeadTemplate(nn.Module):
         rcnn_loss += rcnn_loss_reg
         tb_dict.update(reg_tb_dict)
         tb_dict['rcnn_loss'] = rcnn_loss.item()
+        if self.model_cfg.LOSS_CONFIG.get('GRID_LOSS', False):
+            grid_reg_loss = self.get_gridloc_loss(forward_ret_dict=self.forward_ret_dict)
+            rcnn_loss += grid_reg_loss
+            tb_dict['grid_reg_loss'] = grid_reg_loss.item()
         return rcnn_loss, tb_dict
-
+    def get_gridloc_loss(self, forward_ret_dict):
+        loss_cfgs = self.model_cfg.LOSS_CONFIG
+        grid_reg_target = forward_ret_dict['grid_reg_target'] # b, gsize, c
+        grid_reg = forward_ret_dict['grid_reg'] # b, gsize, c
+        if not loss_cfgs.get('USE_GRID_REG_MASK', False):
+            thr = loss_cfgs.get('GRID_CLS_THR', 0.3)
+            reg_valid_mask = forward_ret_dict['rcnn_cls_labels'].view(-1).unsqueeze(1).unsqueeze(1)
+            fg_mask = (reg_valid_mask > thr)
+        else:
+            reg_valid_mask = forward_ret_dict['reg_valid_mask'].view(-1).unsqueeze(1).unsqueeze(1) 
+            fg_mask = (reg_valid_mask > 0)
+        fg_sum = fg_mask.long().sum().item()
+        grid_loss_reg = self.grid_reg_loss_func(grid_reg_target, grid_reg)
+        # grid_loss_reg = (grid_loss_reg.view(rcnn_batch_size, -1) * fg_mask.unsqueeze(dim=-1).float()).sum() / max(fg_sum, 1)
+        # rcnn_loss_reg = rcnn_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
+        grid_loss_reg = (grid_loss_reg * fg_mask.float()).sum() / (max(fg_sum, 1) * self.pool_cfg.GRID_SIZE ** 3)
+        grid_loss_reg = grid_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_grid_reg_weight']
+        return grid_loss_reg
     def generate_predicted_boxes(self, batch_size, rois, cls_preds, box_preds):
         """
         Args:

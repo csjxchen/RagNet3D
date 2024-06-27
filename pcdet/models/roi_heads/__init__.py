@@ -6,6 +6,8 @@ from .voxelrcnn_head import VoxelRCNNHead
 from .roi_head_template import RoIHeadTemplate
 from .mppnet_head import MPPNetHead
 from .mppnet_memory_bank_e2e import MPPNetHeadE2E
+from .pvrcnn_head_adaptive4 import PVRCNNHeadAdaptive4
+from .pvrcnn_head_adaptive5 import PVRCNNHeadAdaptive5
 
 __all__ = {
     'RoIHeadTemplate': RoIHeadTemplate,
@@ -16,4 +18,6 @@ __all__ = {
     'VoxelRCNNHead': VoxelRCNNHead,
     'MPPNetHead': MPPNetHead,
     'MPPNetHeadE2E': MPPNetHeadE2E,
+    'PVRCNNHeadAdaptive4':PVRCNNHeadAdaptive4,
+    'PVRCNNHeadAdaptive5':PVRCNNHeadAdaptive5
 }
