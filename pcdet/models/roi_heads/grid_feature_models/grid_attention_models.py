@@ -129,4 +129,14 @@ class GridPoolLocSigmoid(nn.Module):
         out = pool_x * grid_weights
         if self.model_cfg.VG_SHARED_MODEL.CONCAT_POOL_FEATURES:
             out = torch.cat([pooled_features, out], dim=-1)
-        return out
+        print(self.model_cfg.VG_SHARED_MODEL.get('VISUALIZE_WEIGHTS', False))
+        if self.model_cfg.VG_SHARED_MODEL.get('VISUALIZE_WEIGHTS', False):
+            return out, grid_weights
+        else:
+            return out
+
+# def visualize_grid_weights(weights):
+#     '''
+#         weights:(num_proposals, grid_num, channels
+#     '''
+#     weights = weights.reshape(weights.shape[0], )

@@ -125,7 +125,7 @@ class PVRCNNHeadAdaptive4(RoIHeadTemplate):
         global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
         if self.training:
             grid_targets = self.assign_grid_targets(gt_of_rois, rois.clone().detach(), local_roi_grid_points)
-            
+        
         xyz = point_coords[:, 1:4]
         xyz_batch_cnt = xyz.new_zeros(batch_size).int()
         batch_idx = point_coords[:, 0]
@@ -145,7 +145,11 @@ class PVRCNNHeadAdaptive4(RoIHeadTemplate):
             -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
             pooled_features.shape[-1]
         )  # (BxN, 6x6x6, C)
+        # if self.model_cfg.POOLED_FEATURE_DETACHED:
+        #     pooled_features, detach_pooled_features = torch.cat([pooled_features.contiguous(), dense_idx], dim=-1), torch.cat([pooled_features.contiguous().detach(), dense_idx], dim=-1)
+        # else:
         pooled_features = torch.cat([pooled_features, dense_idx], dim=-1)
+
         if self.model_cfg.POOLED_FEATURE_DETACHED:
             pooled_points, detach_pooled_features = self.roi_grid_pool_layer(
                 xyz=xyz.contiguous(),
@@ -234,8 +238,10 @@ class PVRCNNHeadAdaptive4(RoIHeadTemplate):
             grid_loc_features = self.grid_shared_model(grid_reg) # n*gsize, c 
         grid_reg = grid_reg.view(pooled_features.shape[0], pooled_features.shape[1], -1)
         grid_loc_features = grid_loc_features.view(pooled_features.shape[0], pooled_features.shape[1], -1)
-        
-        pg_features = self.vg_shared_model(pooled_features[:, :, :-3], grid_loc_features)
+        if self.model_cfg.VG_SHARED_MODEL.get('VISUALIZE_WEIGHTS', False):
+            pg_features, grid_weight = self.vg_shared_model(pooled_features[:, :, :-3], grid_loc_features)
+        else:
+            pg_features, grid_weight = self.vg_shared_model(pooled_features[:, :, :-3], grid_loc_features)
         # pg_features = pg_features.view(pooled_features.shape[0], pooled_features.shape[1], -1).contiguous().view(pooled_features.shape[0], -1)
         batch_size_rcnn = pg_features.shape[0]
         pg_features = pg_features.permute(0, 2, 1).\
@@ -251,6 +257,10 @@ class PVRCNNHeadAdaptive4(RoIHeadTemplate):
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False
+            # if self.model_cfg.VG_SHARED_MODEL.get('VISUALIZE_WEIGHTS', False):
+            #     grid_loc_features, grid_weights = self.grid_shared_model(grid_reg.clone().detach()) # n*gsize, c
+            # else:
+            #     grid_loc_features = self.grid_shared_model(grid_reg.clone().detach()) # n*gsize, c
         else:
             targets_dict['rcnn_cls'] = rcnn_cls
             targets_dict['rcnn_reg'] = rcnn_reg
@@ -259,3 +269,56 @@ class PVRCNNHeadAdaptive4(RoIHeadTemplate):
             self.forward_ret_dict = targets_dict
 
         return batch_dict
+
+# def visualize_grid_weights(weights):
+#     '''
+#         weights:(num_proposals, grid_num, channels
+#     '''
+#     import pathlib
+#     weights = weights.reshape(weights.shape[0], 6, 6, 6, -1)
+#     weights = weights[:, 0, :, :, 0]
+#     save_path = pathlib.Path('weight_vis')
+#     save_path.mkdir(exist_ok=True)
+#     for i in range(weights.shape[0]):
+#         save_file = save_path / "%04d.png" %(i)
+#         weights
+def visualize_grid_weights(weights):
+    '''
+        weights:(num_proposals, grid_num, channels)
+        将权重可视化为热力图并保存
+    '''
+    import matplotlib
+    matplotlib.use('Agg')
+    import pathlib
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # 重塑权重张量并取第一个通道
+    weights = weights.reshape(weights.shape[0], 6, 6, 6, -1)
+    weights = weights[:, 0, :, :, 0]
+    
+    # 创建保存目录
+    save_path = pathlib.Path('/chenjiaxin/research_exps/detection3d/OpenPCDet/output/waymo_models/pv_rcnn_adaptive4_formal/pv_rcnn_adaptive4_avg_test/default/weight_vis')
+    save_path.mkdir(exist_ok=True)
+    
+    # 获取权重的最大最小值用于归一化
+    weights  = weights.detach().cpu().numpy()
+    vmin, vmax = weights.min(), weights.max()
+    
+    for i in range(weights.shape[0]):
+        # 获取当前proposal的权重图
+        weight_map = weights[i]
+        
+        # 对比度增强:拉伸到[0,1]区间
+        weight_map = (weight_map - vmin) / (vmax - vmin + 1e-8)
+        
+        # 创建图像
+        plt.figure(figsize=(6,6))
+        plt.imshow(weight_map, cmap='jet')
+        plt.colorbar()
+        plt.axis('off')
+        
+        # 保存并关闭图像
+        save_file = save_path / f"{i:04d}.png"
+        plt.savefig(save_file, bbox_inches='tight', pad_inches=0)
+        plt.close()

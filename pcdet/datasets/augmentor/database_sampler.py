@@ -23,9 +23,10 @@ class DataBaseSampler(object):
 
         self.logger = logger
         self.db_infos = {}
+        self.db_start_cnt_infos = {}
         for class_name in class_names:
             self.db_infos[class_name] = []
-
+            self.db_start_cnt_infos["start_cnt_for_%s" %(class_name)] = 0
         self.use_shared_memory = sampler_cfg.get('USE_SHARED_MEMORY', False)
 
         for db_info_path in sampler_cfg.DB_INFO_PATH:
@@ -34,13 +35,17 @@ class DataBaseSampler(object):
                 assert len(sampler_cfg.DB_INFO_PATH) == 1
                 sampler_cfg.DB_INFO_PATH[0] = sampler_cfg.BACKUP_DB_INFO['DB_INFO_PATH']
                 sampler_cfg.DB_DATA_PATH[0] = sampler_cfg.BACKUP_DB_INFO['DB_DATA_PATH']
+                # print()
                 db_info_path = self.root_path.resolve() / sampler_cfg.DB_INFO_PATH[0]
                 sampler_cfg.NUM_POINT_FEATURES = sampler_cfg.BACKUP_DB_INFO['NUM_POINT_FEATURES']
 
             with open(str(db_info_path), 'rb') as f:
                 infos = pickle.load(f)
-                [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names]
-
+                # [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names]
+                for cur_class in class_names:
+                    self.db_infos[cur_class].extend(infos[cur_class])
+                    if "start_cnt_for_%s" %(class_name) in infos:
+                        self.db_start_cnt_infos["start_cnt_for_%s" %(class_name)] = infos["start_cnt_for_%s" %(class_name)]
         for func_name, val in sampler_cfg.PREPARE.items():
             self.db_infos = getattr(self, func_name)(self.db_infos, val)
 
@@ -76,7 +81,6 @@ class DataBaseSampler(object):
             sa_key = self.sampler_cfg.DB_DATA_PATH[0]
             if cur_rank % num_gpus == 0 and os.path.exists(f"/dev/shm/{sa_key}"):
                 SharedArray.delete(f"shm://{sa_key}")
-
             if num_gpus > 1:
                 dist.barrier()
             self.logger.info('GT database has been removed from shared memory')
@@ -88,9 +92,10 @@ class DataBaseSampler(object):
         assert self.sampler_cfg.DB_DATA_PATH.__len__() == 1, 'Current only support single DB_DATA'
         db_data_path = self.root_path.resolve() / self.sampler_cfg.DB_DATA_PATH[0]
         sa_key = self.sampler_cfg.DB_DATA_PATH[0]
-
+        # if you shut down your program actively, you need manually delete /dev/shm/{sa_key} 
         if cur_rank % num_gpus == 0 and not os.path.exists(f"/dev/shm/{sa_key}"):
             gt_database_data = np.load(db_data_path)
+            print("load from %s" % str(db_data_path), gt_database_data.shape)
             common_utils.sa_create(f"shm://{sa_key}", gt_database_data)
 
         if num_gpus > 1:
@@ -388,16 +393,20 @@ class DataBaseSampler(object):
         for idx, info in enumerate(total_valid_sampled_dict):
             if self.use_shared_memory:
                 start_offset, end_offset = info['global_data_offset']
+                start_cnt = self.db_start_cnt_infos["start_cnt_for_%s" %(info['name'])]
+                start_offset += start_cnt
+                end_offset += start_cnt
                 obj_points = copy.deepcopy(gt_database_data[start_offset:end_offset])
+                # print(obj_points.shape, info['num_points_in_gt'])
             else:
                 file_path = self.root_path / info['path']
 
                 obj_points = np.fromfile(str(file_path), dtype=np.float32).reshape(
                     [-1, self.sampler_cfg.NUM_POINT_FEATURES])
                 if obj_points.shape[0] != info['num_points_in_gt']:
-                    obj_points = np.fromfile(str(file_path), dtype=np.float64).reshape(-1, self.sampler_cfg.NUM_POINT_FEATURES)
-
-            assert obj_points.shape[0] == info['num_points_in_gt']
+                    obj_points = np.fromfile(str(file_path), dtype=np.float32).reshape(-1, self.sampler_cfg.NUM_POINT_FEATURES)
+            
+            assert obj_points.shape[0] == info['num_points_in_gt'], "obj_points:%d||num_points_in_gt:%d" %(obj_points.shape[0], info['num_points_in_gt'])
             obj_points[:, :3] += info['box3d_lidar'][:3].astype(np.float32)
 
             if self.sampler_cfg.get('USE_ROAD_PLANE', False):

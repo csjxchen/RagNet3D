@@ -9,7 +9,7 @@ from test import repeat_eval_ckpt
 import torch
 import torch.nn as nn
 from tensorboardX import SummaryWriter
-
+import time
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, model_fn_decorator
@@ -67,6 +67,16 @@ def parse_config():
 
 def main():
     args, cfg = parse_config()
+    # while not (Path(cfg.DATA_CONFIG.DATA_PATH) / 'waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_1_parallel_new.pkl').exists():
+    #     print("waiting 10min for %s" %str(Path(cfg.DATA_CONFIG.DATA_PATH) / 'waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_1_parallel_new.pkl'))
+    #     time.sleep(10*60)
+    
+    
+    # while not (Path(cfg.DATA_CONFIG.DATA_PATH) / 'waymo_processed_data_v0_5_0_gt_database_train_sampled_5_global.npy').exists():
+    #     print("waiting 10min for %s" %str(Path(cfg.DATA_CONFIG.DATA_PATH) / 'waymo_processed_data_v0_5_0_gt_database_train_sampled_5_global.pkl'))
+    #     time.sleep(10*60)
+    
+    
     if args.launcher == 'none':
         dist_train = False
         total_gpus = 1
@@ -75,7 +85,6 @@ def main():
             args.tcp_port, args.local_rank, backend='nccl'
         )
         dist_train = True
-
     if args.batch_size is None:
         args.batch_size = cfg.OPTIMIZATION.BATCH_SIZE_PER_GPU
     else:
@@ -159,7 +168,7 @@ def main():
 
     model.train()  # before wrap to DistributedDataParallel to support fixed some parameters
     if dist_train:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()], find_unused_parameters=False)
     logger.info(f'----------- Model {cfg.MODEL.NAME} created, param count: {sum([m.numel() for m in model.parameters()])} -----------')
     logger.info(model)
 

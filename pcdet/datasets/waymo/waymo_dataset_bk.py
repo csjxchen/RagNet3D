@@ -15,18 +15,23 @@ from tqdm import tqdm
 from pathlib import Path
 from functools import partial
 from threading import Thread
-
-from ...ops.roiaware_pool3d import roiaware_pool3d_utils
-from ...utils import box_utils, common_utils
-from ..dataset import DatasetTemplate
+import sys
+sys.path.append("/opt/data/private/detection/RagNet3D/pcdet")
+from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
+from pcdet.utils import box_utils, common_utils
+from pcdet.datasets.dataset import DatasetTemplate
 import gc
 import time
 def process_chunk_for_process(tid, chunk, idx_in_chunk, chunksize, create_gt_database_of_single_scene, file_prex):
     chunk_list = []
-    interval = 1000
+    interval = 1000 # if you want continue to run the program shutted out of expectation, please remain the interval 
     ''' chunksize is about 9800'''
-    break_chunk = 2000
+    break_chunk = chunksize
     for i, info_with_idx in enumerate(zip(chunk, idx_in_chunk)):
+        file = file_prex / ("p_%02d_%04d.pkl" %(tid, int(i/interval) + 1 ))
+        if file.exists():
+            print('%s exists' %str(file))
+            continue
         chunk_id = int(i/interval) + 1 # 1: 0~(interval-1), 2: interval~(2*interval-1) .. 
         if i >= break_chunk:
             break
@@ -699,7 +704,15 @@ class WaymoDataset(DatasetTemplate):
 
     def create_groundtruth_database_parallel(self, info_path, save_path, used_classes=None, split='train', sampled_interval=10,
                                              processed_data_tag=None, num_workers=16, crop_gt_with_tail=False, backend='process'):
-        
+        ''' 
+            支持断点续跑, 注意这个文件夹,只会提取 bin of instances 和 
+            对应的pickle信息文件, 
+            不支持生成 waymo_processed_data_v0_5_0_gt_database_train_sampled_1_global.npy
+            断点续跑的时候num_workers要保持不变, 不然会打乱chunk的存储内容块
+        '''
+        chunk_gt_database_prefix = save_path / ('chunk_gt_database_pickle')
+        if not chunk_gt_database_prefix.exists():
+            chunk_gt_database_prefix.mkdir()
         use_sequence_data = self.dataset_cfg.get('SEQUENCE_CONFIG', None) is not None and self.dataset_cfg.SEQUENCE_CONFIG.ENABLED
         if use_sequence_data:
             st_frame, ed_frame = self.dataset_cfg.SEQUENCE_CONFIG.SAMPLE_OFFSET[0], self.dataset_cfg.SEQUENCE_CONFIG.SAMPLE_OFFSET[1]
@@ -710,7 +723,9 @@ class WaymoDataset(DatasetTemplate):
         else:
             database_save_path = save_path / ('%s_gt_database_%s_sampled_%d_parallel' % (processed_data_tag, split, sampled_interval))
             db_info_save_path = save_path / ('%s_waymo_dbinfos_%s_sampled_%d_parallel.pkl' % (processed_data_tag, split, sampled_interval))
-        
+        if db_info_save_path.exists():
+            print('%s exists' %str(db_info_save_path))
+            return 
         database_save_path.mkdir(parents=True, exist_ok=True)
         start = time.time()
         with open(info_path, 'rb') as f:
@@ -738,7 +753,7 @@ class WaymoDataset(DatasetTemplate):
                 p = multiprocessing.Process(target=process_chunk_for_process, args=(i+1, infos[start_index:start_index+chunksize], info_idx[start_index:start_index+chunksize], 
                                                                                     chunksize, 
                                                                                     create_gt_database_of_single_scene, 
-                                                                                    save_path / ('chunk_gt_database_pickle_5')))
+                                                                                    chunk_gt_database_prefix))
                 processes.append(p)
                 p.start()
                 infos = infos[start_index+chunksize:]
@@ -749,9 +764,8 @@ class WaymoDataset(DatasetTemplate):
             gc.collect()
             print('start collecting data...')
             all_db_infos = {}
-            # for i in range(num_workers):
-            for _p in os.listdir(save_path / ('chunk_gt_database_pickle_5')):
-                with open(save_path / ('chunk_gt_database_pickle_5') / _p, 'rb') as f:
+            for _p in os.listdir(chunk_gt_database_prefix):
+                with open(chunk_gt_database_prefix / _p, 'rb') as f:
                     chunk = pickle.load(f)
                 print('reading %s'  %(_p))
                 for i, cur_db_infos in enumerate(chunk):
@@ -838,8 +852,7 @@ def create_waymo_infos(dataset_cfg, class_names, data_path, save_path,
 
     # if update_info_only:
     # return
-
-    print('---------------Start create groundtruth database for data augmentation---------------')
+    # print('---------------Start create groundtruth database for data augmentation---------------')
     # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # dataset.set_split(train_split)
     # dataset.create_groundtruth_database(
@@ -980,7 +993,124 @@ def update_global_offset(k_v_pair, start_cnt_kv):
     print("process  named update_global_offset for %s finished" % k)
     return new_db_infos
 
-def generate_db_database_path_parallel(info_path, save_path, data_path, cfg, db_data_save_path, new_info_path, tmp_save_path):
+def process_db_info_thread_parallel(k_v_pair, data_path, cfg, start_cnt, tmp_save_path, num_threads=4):
+    k, v = k_v_pair
+    # v = v[:1000]
+    task_len = v.__len__()
+    interval = 10000
+    print(f"Processing {k} with {num_threads} threads")
+
+    tmp_save_path = tmp_save_path / k
+    tmp_save_path.mkdir(parents=True, exist_ok=True)
+    print(f"tmp_save_path is mkdir: {tmp_save_path}")
+    # 将数据分成多个chunk
+    chunk_size = task_len // num_threads + (1 if task_len % num_threads else 0)
+    chunks = []
+    for i in range(0, task_len, chunk_size):
+        chunks.append(v[i:min(i + chunk_size, task_len)])
+    
+    def process_chunk(chunk_id, chunk_data):
+        chunk_infos = {}
+        chunk_points = []
+        points_offset_map = {}  # 记录每个对象在当前chunk中的偏移量
+        local_cnt = 0
+        path_list = []
+        
+        for i, _info in enumerate(chunk_data):
+            if (i + 1) % 100 == 0:
+                print(f"Thread {chunk_id}: {i+1}/{len(chunk_data)} in {k}")
+
+            info_path = os.path.join(data_path, _info['path'])
+            obj_points = np.fromfile(info_path, dtype=np.float32).reshape(
+                -1, cfg['DATA_AUGMENTOR']['AUG_CONFIG_LIST'][0]['NUM_POINT_FEATURES'])
+            
+            # 记录当前对象在chunk中的起始和结束位置
+            points_offset_map[i] = (local_cnt, local_cnt + obj_points.shape[0])
+            
+            chunk_points.append(obj_points)
+            assert obj_points.shape[0] == _info['num_points_in_gt'], f"Error in {info_path}"
+            
+            _info = _info.copy()
+            # 暂时使用局部偏移量，后续更新为全局偏移量
+            _info['local_offset'] = points_offset_map[i]
+            local_cnt += obj_points.shape[0]
+            
+            if k not in chunk_infos:
+                chunk_infos[k] = [_info]
+            else:
+                chunk_infos[k].append(_info)
+                
+            if (i + 1) % interval == 0:
+                tmp_save_file = tmp_save_path / f'{k}_thread{chunk_id}_{int(i/interval) + 1}_points_chunk.npy'
+                points_array = np.concatenate(chunk_points, axis=0)
+                np.save(tmp_save_file, points_array)
+                path_list.append((str(tmp_save_file), points_array.shape[0]))  # 记录文件和点数
+                chunk_points = []
+                print(f'{tmp_save_file} is saved')
+
+        if chunk_points:
+            tmp_save_file = tmp_save_path / f'{k}_thread{chunk_id}_final_points_chunk.npy'
+            points_array = np.concatenate(chunk_points, axis=0)
+            np.save(tmp_save_file, points_array)
+            path_list.append((str(tmp_save_file), points_array.shape[0]))
+            print(f'{tmp_save_file} is saved')
+            
+        return chunk_infos, path_list, local_cnt
+    # 创建并启动线程
+    threads = []
+    results = []
+    for i in range(len(chunks)):
+        thread = Thread(target=lambda i=i: results.append(process_chunk(i, chunks[i])))
+        threads.append(thread)
+        thread.start()
+
+    # 等待所有线程完成
+    for thread in threads:
+        thread.join()
+
+    # 合并结果
+    new_db_infos = {k: []}
+    all_paths = []
+    total_cnt = start_cnt
+    
+    # 计算每个文件的全局偏移量
+    file_offsets = {}
+    current_offset = total_cnt
+    for chunk_infos, paths, _ in results:
+        for file_path, num_points in paths:
+            file_offsets[file_path] = current_offset
+            current_offset += num_points
+            all_paths.append(file_path)
+    
+    # 更新每个对象的全局偏移量
+    for chunk_infos, paths, _ in results:
+        if k in chunk_infos:
+            for info in chunk_infos[k]:
+                local_start, local_end = info.pop('local_offset')       # 移除临时的局部偏移量
+                file_path = paths[0][0]                                 # 获取当前chunk的文件路径
+                global_start = file_offsets[file_path] + local_start
+                global_end = file_offsets[file_path] + local_end
+                info['global_data_offset'] = [global_start, global_end]
+                new_db_infos[k].append(info)
+
+    # 保存路径列表
+    path_list_file = tmp_save_path / f'{k}_paths.pkl'
+    with open(path_list_file, 'wb') as f:
+        pickle.dump(all_paths, f)
+        print(f"Paths saved to {str(path_list_file)}")
+
+    print(f"Finished processing {k}")
+    return new_db_infos, all_paths, current_offset - start_cnt
+
+
+def generate_db_database_path_parallel(info_path, save_path, data_path, cfg, db_data_save_path, new_info_path, tmp_save_path, num_threads=4):
+    '''
+        生成 waymo_processed_data_v0_5_0_gt_database_train_sampled_1_global.npy 用来激活use_shared_memory
+
+        支持断点续跑, 
+        对应的pickle信息文件, 
+        断点续跑的时候num_threads要保持不变, 不然会打乱chunk的存储内容块
+    '''
     try:
         with open(os.path.join(save_path, str(info_path)), 'rb') as f:
             db_info = pickle.load(f)
@@ -988,6 +1118,8 @@ def generate_db_database_path_parallel(info_path, save_path, data_path, cfg, db_
         db_data_save_path = os.path.join(save_path, str(db_data_save_path))
         new_info_path = os.path.join(save_path, str(new_info_path))
         tmp_save_path = save_path / tmp_save_path
+        if not tmp_save_path.exists():
+            tmp_save_path.mkdir()
         print(f"info_path: {os.path.join(save_path, str(info_path))}")
         print(f'db_data_save_path: {db_data_save_path}')
         print(f'new_info_path: {new_info_path}')
@@ -995,53 +1127,48 @@ def generate_db_database_path_parallel(info_path, save_path, data_path, cfg, db_
         
         # Split tasks
         tasks = list(db_info.items())
-        
         # Initialize multiprocessing pool
-        # with Pool() as pool:
-        #     results = pool.starmap(process_db_info, [(task, data_path, cfg, 0, tmp_save_path) for task in tasks])
-        # gc.collect()
+        with Pool() as pool:
+            results = pool.starmap(process_db_info_thread_parallel, 
+                [(task, data_path, cfg, 0, tmp_save_path, num_threads) for task in tasks])
+        gc.collect()
         # # Merge results
-        # new_db_infos = {}
+        new_db_infos = {}
         stacked_gt_points = []
-        # start_cnt = 0
+        start_cnt = 0
         # start_cnts = {}
-        paths = ['%s_paths.pkl' %t[0] for t in tasks]
+        # paths = ['%s_paths.pkl' %t[0] for t in tasks]
         def read_numpy_from_filelist(flst):
             stacked = []
             for f in flst:
-                data = np.load(f) 
+                data = np.load(f)
                 print('%s'% f, data.shape)
                 stacked.append(data)
             stacked = np.concatenate(stacked, axis=0)
             return stacked
-        for i, p in enumerate(paths):
-            with open(save_path/ 'stacked_points_5' / p, 'rb') as f:
-                flst = pickle.load(f)
-            print(flst) 
-            # assert list(result[0].keys())[0] == tasks[i][0]
+        for i, result in enumerate(results):
+            assert list(result[0].keys())[0] == tasks[i][0]
             cur_key = tasks[i][0]
-            # new_db_infos.update(result[0])
-            # new_db_infos["start_cnt_for_%s" %(cur_key)] = start_cnt
-            _points = read_numpy_from_filelist(flst)
+            print("update info of %s" % cur_key)
+            new_db_infos.update(result[0])
+            new_db_infos["start_cnt_for_%s" %(cur_key)] = start_cnt
+            _points = read_numpy_from_filelist(result[1])
             stacked_gt_points.append(_points)
-            # start_cnt += result[2]
+            start_cnt += result[2]
             gc.collect()
-        # tasks = zip( list(new_db_infos.items()),  list(start_cnts.items()))
-        # with Pool() as pool:
-        #     results = pool.starmap(update_global_offset, [(task[0], task[1]) for task in tasks])
-        # new_db_infos = {}
-        # for i, result in enumerate(results):
-        #     new_db_infos.update(result)
-        # with open(new_info_path, 'wb') as f:
-        #     pickle.dump(new_db_infos, f)
+        with open(new_info_path, 'wb') as f:
+            pickle.dump(new_db_infos, f)
         stacked_gt_points = np.concatenate(stacked_gt_points, axis=0)
         print("stacked_gt_points", stacked_gt_points.shape)
         np.save(db_data_save_path, stacked_gt_points)
-        
         print("Data processing completed successfully.")
-    
+
     except Exception as e:
         print(f"An error occurred: {e}")
+
+
+
+
 
 if __name__ == '__main__':
     import argparse
@@ -1106,13 +1233,14 @@ if __name__ == '__main__':
         dataset_cfg.PROCESSED_DATA_TAG = args.processed_data_tag
         multiprocessing.set_start_method('spawn')
         generate_db_database_path_parallel(
-            info_path="waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_5_parallel.pkl",
+            info_path="waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_1_parallel.pkl",
             save_path=ROOT_DIR / 'data' / 'wod',
             data_path=ROOT_DIR / 'data' / 'wod',
             cfg=dataset_cfg,
-            db_data_save_path='waymo_processed_data_v0_5_0_gt_database_train_sampled_5_global_new.npy',
-            new_info_path="waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_5_parallel_new.pkl",
-            tmp_save_path="stacked_points_5"
+            db_data_save_path='waymo_processed_data_v0_5_0_gt_database_train_sampled_1_global_new.npy',
+            new_info_path="waymo_processed_data_v0_5_0_waymo_dbinfos_train_sampled_1_parallel_new.pkl",
+            tmp_save_path="stacked_points",
+            num_threads=16
             )
     else:
         raise NotImplementedError

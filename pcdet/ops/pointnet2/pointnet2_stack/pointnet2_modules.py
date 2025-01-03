@@ -106,7 +106,7 @@ class StackSAModuleMSG(nn.Module):
                 raise NotImplementedError
             new_features = new_features.squeeze(dim=0).permute(1, 0)  # (M1 + M2 ..., C)
             new_features_list.append(new_features)
-
+        
         new_features = torch.cat(new_features_list, dim=1)  # (M1 + M2 ..., C)
 
         return new_xyz, new_features

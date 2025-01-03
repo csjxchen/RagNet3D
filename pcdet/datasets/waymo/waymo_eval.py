@@ -90,8 +90,13 @@ class OpenPCDetWaymoDetectionMetricsEstimator(tf.test.TestCase):
 
     def build_config(self):
         config = metrics_pb2.Config()
+        # breakdown_generator_ids: OBJECT_TYPE
+
+        # to
+
+        # breakdown_generator_ids: RANGE
         config_text = """
-        breakdown_generator_ids: OBJECT_TYPE
+        breakdown_generator_ids: RANGE
         difficulties {
         levels:1
         levels:2
@@ -111,7 +116,7 @@ class OpenPCDetWaymoDetectionMetricsEstimator(tf.test.TestCase):
 
         text_format.Merge(config_text, config)
         return config
-
+    
     def build_graph(self, graph):
         with graph.as_default():
             self._pd_frame_id = tf.compat.v1.placeholder(dtype=tf.int64)
